@@ -36,10 +36,12 @@ decay_step = 100
 decay_rate = 0.5
 wd = 1e-3
 mIU_benchmark = 0
-iter_show = 10
+iter_show = 100
+show_plt = False
+
 device = torch.device("cuda")
 net_one = smp.DeepLabV3Plus(
-    encoder_name="efficientnet-b7",
+    encoder_name="efficientnet-b0",
     encoder_weights=None,
     encoder_depth=5,
     in_channels=3,
@@ -99,7 +101,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
     for i, data in tqdm(enumerate(train_dataloader),
                         total=len(train_dataloader),
                         leave=False):
-
+        if i > 20: break
         img, lab = data
         img, lab = img.to(device), lab.to(device)
         mask = net_one(img)
@@ -116,7 +118,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
             mask.detach().cpu().numpy(), NUM_CLASSES)
 
         train_miou.add(train_mean_iu_i)
-        if i % iter_show==0:
+        if i % iter_show == 0:
             now_time = time.time()
             timeiter = (now_time - last_time) / iter_show
             print(
@@ -131,6 +133,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
     net_one.eval()
     for i, data in tqdm(enumerate(test_dataloader),
                         total=len(test_dataloader)):
+        if i > 20: break
         img, lab = data
         img, lab = img.to(device), lab.to(device)
         with torch.no_grad():
@@ -141,7 +144,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
             mask.detach().cpu().numpy(), NUM_CLASSES)
 
         test_miou.add(test_mean_iu_i)
-        if i % iter_show==0:
+        if i % iter_show == 0:
             now_time = time.time()
             timeiter = (now_time - last_time) / iter_show
             print(
@@ -167,14 +170,21 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
         },
         ep,
     )
-    image_batch = torch.zeros((2, 1, input_size[0], input_size[0])).float()
+
     show_idx = np.random.randint(0, 8)
-    image_batch[0, 0] = mask[show_idx].float()
-    image_batch[1, 0] = lab[show_idx].float()
-    writer.add_images("test_img",
-                      image_batch,
-                      global_step=ep,
-                      dataformats="NCHW")
+    fig = plt.figure()
+    ax1 = fig.add_subplot(131)
+    ax2 = fig.add_subplot(132)
+    ax3 = fig.add_subplot(133)
+    ax1.imshow(img[show_idx].permute(1, 2, 0).detach().cpu().numpy() * 0.225 +
+               0.5)
+    ax2.imshow(lab[show_idx].detach().cpu().numpy())
+    ax3.imshow(mask[show_idx].detach().cpu().numpy())
+
+    if show_plt:
+        plt.show()
+    else:
+        writer.add_figure("TrainFig", fig, ep, close=True)
 
     if test_miou.value()[0] >= best_mIU:
         best_mIU = test_miou.value()[0]
