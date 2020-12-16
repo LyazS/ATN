@@ -1,2 +1,5 @@
 .vscode
 road_dataset
+log
+*.pth
+__pycache__
