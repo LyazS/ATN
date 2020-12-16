@@ -36,10 +36,10 @@ decay_step = 100
 decay_rate = 0.5
 wd = 1e-3
 mIU_benchmark = 0
-iter_show = 2
+iter_show = 10
 device = torch.device("cuda")
 net_one = smp.DeepLabV3Plus(
-    encoder_name="efficientnet-b5",
+    encoder_name="efficientnet-b7",
     encoder_weights=None,
     encoder_depth=5,
     in_channels=3,
@@ -116,7 +116,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
             mask.detach().cpu().numpy(), NUM_CLASSES)
 
         train_miou.add(train_mean_iu_i)
-        if i > iter_show:
+        if i % iter_show==0:
             now_time = time.time()
             timeiter = (now_time - last_time) / iter_show
             print(
@@ -141,7 +141,7 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
             mask.detach().cpu().numpy(), NUM_CLASSES)
 
         test_miou.add(test_mean_iu_i)
-        if i > iter_show:
+        if i % iter_show==0:
             now_time = time.time()
             timeiter = (now_time - last_time) / iter_show
             print(
