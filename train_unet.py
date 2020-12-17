@@ -9,7 +9,6 @@ import time
 import segmentation_models_pytorch as smp
 from dataset import MapDataset_v2, img_transforms, label_accuracy_score, AverageValueMeter
 import matplotlib.pyplot as plt
-from FCN8s import VGGNet, bnFCN8s, Sobelnet
 
 
 def tqdm(dataset, total=0, leave=False):
@@ -20,11 +19,14 @@ train_root = "road_dataset/road_train_list.txt"
 test_root = "road_dataset/road_val_list.txt"
 file_prefix = "road_dataset"
 
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(log_dir=os.path.join("./log"))
+
 input_size = (256, 256)
 batch_size = 2
 NUM_CLASSES = 2
-load_path = "dlpeb7.pth"
-save_path = "dlpeb7.pth"
+load_path = "dlpeb0.pth"
+save_path = "dlpeb0.pth"
 EPOCH_start = 0
 EPOCH = 1000
 base_LR = 1e-4
@@ -36,16 +38,13 @@ iter_show = 100
 show_plt = False
 
 device = torch.device("cuda")
-# net_one = smp.Unet(
-#     encoder_name="efficientnet-b7",
-#     encoder_weights=None,
-#     encoder_depth=5,
-#     in_channels=3,
-#     classes=NUM_CLASSES,
-# ).to(device)
-encoder_one = VGGNet('vgg16', batch_norm=True, in_channels=3)
-net_one = bnFCN8s(encoder_one, NUM_CLASSES, 1).to(device)
-thloss = Sobelnet().to(device)
+net_one = smp.Unet(
+    encoder_name="efficientnet-b7",
+    encoder_weights=None,
+    encoder_depth=5,
+    in_channels=3,
+    classes=NUM_CLASSES,
+).to(device)
 
 train_data = MapDataset_v2(input_size, img_transforms, train_root, file_prefix)
 train_dataloader = torch.utils.data.DataLoader(train_data,
@@ -81,8 +80,6 @@ scheduler_lr_one = torch.optim.lr_scheduler.StepLR(optm_one,
                                                    step_size=decay_step,
                                                    gamma=decay_rate)
 
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(log_dir=os.path.join("./log"))
 Loss = nn.CrossEntropyLoss()
 
 l_seg = AverageValueMeter()
@@ -100,27 +97,21 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
     for i, data in tqdm(enumerate(train_dataloader),
                         total=len(train_dataloader),
                         leave=False):
-        if i > 20: break
+        #         if i > 20: break
         img, lab = data
         img, lab = img.to(device), lab.to(device)
-        mask, threshold = net_one(img)
+        mask = net_one(img)
         loss_seg = Loss(mask, lab)
 
-        mask_prob = torch.softmax(mask, dim=1)[:, 1]
-        loss_th, cl = thloss(threshold,
-                             mask_prob.detach().unsqueeze(1), lab.unsqueeze(1))
-
         optm_one.zero_grad()
-        (loss_seg + loss_th).backward()
+        loss_seg.backward()
         optm_one.step()
 
         l_seg.add(loss_seg.item())
         mask = torch.argmax(mask, dim=1)
-        th_pred = torch.zeros_like(mask).squeeze()
-        th_pred[mask_prob > threshold.squeeze()] = 1
         _, _, train_mean_iu_i, _ = label_accuracy_score(
             lab.detach().cpu().numpy(),
-            th_pred.detach().cpu().numpy(), NUM_CLASSES)
+            mask.detach().cpu().numpy(), NUM_CLASSES)
 
         train_miou.add(train_mean_iu_i)
         if i % iter_show == 0:
@@ -138,19 +129,15 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
     net_one.eval()
     for i, data in tqdm(enumerate(test_dataloader),
                         total=len(test_dataloader)):
-        if i > 20: break
+        #         if i > 20: break
         img, lab = data
         img, lab = img.to(device), lab.to(device)
         with torch.no_grad():
-            mask,threshold = net_one(img)
-            mask_prob = torch.softmax(mask, dim=1)[:, 1]
+            mask = net_one(img)
             mask = torch.argmax(mask, dim=1)
-        th_pred = torch.zeros_like(mask).squeeze()
-        th_pred[mask_prob > threshold.squeeze()] = 1
-        
         _, _, test_mean_iu_i, _ = label_accuracy_score(
             lab.detach().cpu().numpy(),
-            th_pred.detach().cpu().numpy(), NUM_CLASSES)
+            mask.detach().cpu().numpy(), NUM_CLASSES)
 
         test_miou.add(test_mean_iu_i)
         if i % iter_show == 0:
@@ -175,22 +162,20 @@ for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH)):
         {
             "train_miou": train_miou.value()[0],
             "test_miou": test_miou.value()[0],
-            "best_mIU": best_mIU,
+            "best_mIU2": best_mIU,
         },
         ep,
     )
 
     show_idx = np.random.randint(0, 8)
     fig = plt.figure()
-    ax1 = fig.add_subplot(221)
-    ax2 = fig.add_subplot(222)
-    ax3 = fig.add_subplot(223)
-    ax4 = fig.add_subplot(224)
+    ax1 = fig.add_subplot(131)
+    ax2 = fig.add_subplot(132)
+    ax3 = fig.add_subplot(133)
     ax1.imshow(img[show_idx].permute(1, 2, 0).detach().cpu().numpy() * 0.225 +
                0.5)
     ax2.imshow(lab[show_idx].detach().cpu().numpy())
     ax3.imshow(mask[show_idx].detach().cpu().numpy())
-    ax3.imshow(th_pred[show_idx].detach().cpu().numpy())
 
     if show_plt:
         plt.show()

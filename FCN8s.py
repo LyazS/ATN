@@ -15,7 +15,23 @@ from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 import pdb
 import cv2
-device = torch.device("cuda")
+
+
+class AverageValueMeter():
+    def __init__(self):
+        self.N = 0
+        self.ave = 0
+
+    def add(self, x):
+        self.ave = self.N / (1 + self.N) * self.ave + 1 / (1 + self.N) * x
+        self.N += 1
+
+    def reset(self):
+        self.N = 0
+        self.ave = 0
+
+    def value(self):
+        return self.ave, self.N
 
 
 def read_as_list(rootpath):
@@ -706,228 +722,213 @@ class ThresholdLoss(nn.Module):
         return loss
 
 
-# # train.py
+if __name__ == "__main__":
+    device = torch.device("cuda")
+    img_root = "road_dataset/image_train/"
+    lab_root = "road_dataset/label_train/"
 
-img_root = "road_dataset/image_train/"
-lab_root = "road_dataset/label_train/"
+    input_size = (256, 256)
+    batch_size = 8
+    NUM_CLASSES = 2
+    load_path = "FCN8s_SplitNet_EdgeLossV2.pth"
+    save_path = "FCN8s_SplitNet_EdgeLossV2.pth"
+    EPOCH_start = 0
+    EPOCH = 1000
+    base_LR = 1e-4
+    decay_step = 100
+    decay_rate = 0.5
+    wd = 1e-3
+    mIU_benchmark = 0
 
-input_size = (256, 256)
-batch_size = 8
-NUM_CLASSES = 2
-load_path = "FCN8s_SplitNet_EdgeLossV2.pth"
-save_path = "FCN8s_SplitNet_EdgeLossV2.pth"
-EPOCH_start = 0
-EPOCH = 1000
-base_LR = 1e-4
-decay_step = 100
-decay_rate = 0.5
-wd = 1e-3
-mIU_benchmark = 0
+    train_data = MapDataset(input_size,
+                            img_transforms,
+                            img_root,
+                            lab_root,
+                            rc=False)
+    train_dataloader = torch.utils.data.DataLoader(train_data,
+                                                   batch_size,
+                                                   True,
+                                                   num_workers=32,
+                                                   drop_last=True)
 
-train_data = MapDataset(input_size,
-                        img_transforms,
-                        img_root,
-                        lab_root,
-                        rc=False)
-train_dataloader = torch.utils.data.DataLoader(train_data,
-                                               batch_size,
-                                               True,
-                                               num_workers=32,
-                                               drop_last=True)
+    img_root_t = "road_dataset/image_val/"
+    lab_root_t = "road_dataset/label_val/"
 
-img_root_t = "road_dataset/image_val/"
-lab_root_t = "road_dataset/label_val/"
+    test_data = MapDataset(input_size,
+                           img_transforms,
+                           img_root_t,
+                           lab_root_t,
+                           rc=False)
+    test_dataloader = torch.utils.data.DataLoader(test_data,
+                                                  8,
+                                                  shuffle=False,
+                                                  num_workers=8,
+                                                  drop_last=True)
 
-test_data = MapDataset(input_size,
-                       img_transforms,
-                       img_root_t,
-                       lab_root_t,
-                       rc=False)
-test_dataloader = torch.utils.data.DataLoader(test_data,
-                                              8,
-                                              shuffle=False,
-                                              num_workers=8,
-                                              drop_last=True)
+    encoder_one = VGGNet('vgg16', batch_norm=True, in_channels=3)
+    net_one = bnFCN8s(encoder_one, NUM_CLASSES, 1).to(device)
+    thloss = Sobelnet().to(device)
+    edgenet = Edgenet().to(device)
+    if load_path is not None:
+        if os.path.isfile(load_path):
+            try:
+                checkpoint = torch.load(load_path)
+                net_one.load_state_dict(checkpoint['state_one'])
+                mIU_benchmark = checkpoint['mIU']
+                print("Load last checkpoint OK ")
+                print("mIU=", mIU_benchmark)
+            except:
+                print("Can't Load the checkpoint QAQ")
+                mIU_benchmark = 0
+        else:
+            EPOCH_start = 0
+            print("Can't find the checkpoint ,start train from epoch 0 ...")
 
-encoder_one = VGGNet('vgg16', batch_norm=True, in_channels=3)
-net_one = bnFCN8s(encoder_one, NUM_CLASSES, 1).to(device)
-thloss = Sobelnet().to(device)
-edgenet = Edgenet().to(device)
-if load_path is not None:
-    if os.path.isfile(load_path):
-        try:
-            checkpoint = torch.load(load_path)
-            net_one.load_state_dict(checkpoint['state_one'])
-            mIU_benchmark = checkpoint['mIU']
-            print("Load last checkpoint OK ")
-            print("mIU=", mIU_benchmark)
-        except:
-            print("Can't Load the checkpoint QAQ")
-            mIU_benchmark = 0
-    else:
-        EPOCH_start = 0
-        print("Can't find the checkpoint ,start train from epoch 0 ...")
+    his = hl.History()
+    canv = hl.Canvas()
+    optm_one = torch.optim.Adam(net_one.parameters(),
+                                lr=base_LR,
+                                weight_decay=wd)
+    scheduler_lr_one = torch.optim.lr_scheduler.StepLR(optm_one,
+                                                       step_size=decay_step,
+                                                       gamma=decay_rate)
 
-his = hl.History()
-canv = hl.Canvas()
-optm_one = torch.optim.Adam(net_one.parameters(), lr=base_LR, weight_decay=wd)
-scheduler_lr_one = torch.optim.lr_scheduler.StepLR(optm_one,
-                                                   step_size=decay_step,
-                                                   gamma=decay_rate)
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(log_dir=os.path.join("./log"))
+    # Loss = nn.NLLLoss()
+    Loss = nn.CrossEntropyLoss()
 
+    l_seg = AverageValueMeter()
+    l_th = AverageValueMeter()
+    l_all = AverageValueMeter()
+    train_miou_seg = AverageValueMeter()
+    train_miou_th = AverageValueMeter()
 
-class AverageValueMeter():
-    def __init__(self):
-        self.N = 0
-        self.ave = 0
+    test_acc = AverageValueMeter()
+    test_mean_iu = AverageValueMeter()
+    test_acc_e = AverageValueMeter()
+    test_mean_iu_e = AverageValueMeter()
 
-    def add(self, x):
-        self.ave = self.N / (1 + self.N) * self.ave + 1 / (1 + self.N) * x
-        self.N += 1
+    best_mIU = 0
+    best_mIU_2 = mIU_benchmark
+    EPOCH_start = 0
+    for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH),
+                   dynamic_ncols=True):
+        train_length = len(train_dataloader)
+        l_seg.reset()
+        l_th.reset()
+        l_all.reset()
+        train_miou_seg.reset()
+        train_miou_th.reset()
+        net_one.train()
+        for i, data in tqdm(enumerate(train_dataloader),
+                            total=train_length,
+                            leave=False):
+            if i > 10:
+                break
+            img, lab = data
+            img, lab = img.to(device), lab.to(device)
+            seg_output, th_output = net_one(img)
+            loss_seg = Loss(seg_output, lab)
+            seg_output_p = torch.softmax(seg_output, dim=1)[:, 1]
+            loss_th, cl = thloss(th_output,
+                                 seg_output_p.detach().unsqueeze(1),
+                                 lab.unsqueeze(1))
+            loss = loss_seg + loss_th
+            optm_one.zero_grad()
+            loss.backward()
+            optm_one.step()
 
-    def reset(self):
-        self.N = 0
-        self.ave = 0
+            l_seg.add(loss_seg.item())
+            l_th.add(loss_th.item())
+            l_all.add(loss.item())
 
-    def value(self):
-        return self.ave, self.N
+            seg_pred = seg_output.max(dim=1)[1]
+            th_pred = torch.zeros_like(seg_pred).squeeze()
+            th_pred[seg_output_p > th_output.squeeze()] = 1
 
+            _, _, train_mean_iu_i, _ = label_accuracy_score(
+                lab.data.cpu().numpy(),
+                seg_pred.data.cpu().numpy(), NUM_CLASSES)
+            _, _, train_mean_iu_i_2, _ = label_accuracy_score(
+                lab.data.cpu().numpy(),
+                th_pred.data.cpu().numpy(), NUM_CLASSES)
 
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(log_dir=os.path.join("./log"))
-# Loss = nn.NLLLoss()
-Loss = nn.CrossEntropyLoss()
+            train_miou_seg.add(train_mean_iu_i)
+            train_miou_th.add(train_mean_iu_i_2)
 
-l_seg = AverageValueMeter()
-l_th = AverageValueMeter()
-l_all = AverageValueMeter()
-train_miou_seg = AverageValueMeter()
-train_miou_th = AverageValueMeter()
+        scheduler_lr_one.step()  # 动态学习率
 
-test_acc = AverageValueMeter()
-test_mean_iu = AverageValueMeter()
-test_acc_e = AverageValueMeter()
-test_mean_iu_e = AverageValueMeter()
+        with torch.no_grad():
+            test_acc.reset()
+            test_mean_iu.reset()
+            test_acc_e.reset()
+            test_mean_iu_e.reset()
+            net_one.eval()
+            for _ in tqdm(range(1), ):
+                for i, data in tqdm(enumerate(test_dataloader),
+                                    total=test_dataloader.__len__(),
+                                    leave=False):
+                    if i > 5:
+                        break
+                    img, lab = data
+                    img, lab = img.to(device), lab.to(device)
 
-best_mIU = 0
-best_mIU_2 = mIU_benchmark
-EPOCH_start = 0
-for ep in tqdm(range(EPOCH_start, EPOCH_start + EPOCH), dynamic_ncols=True):
-    train_length = len(train_dataloader)
-    l_seg.reset()
-    l_th.reset()
-    l_all.reset()
-    train_miou_seg.reset()
-    train_miou_th.reset()
-    net_one.train()
-    for i, data in tqdm(enumerate(train_dataloader),
-                        total=train_length,
-                        leave=False):
-        if i > 10:
-            break
-        img, lab = data
-        img, lab = img.to(device), lab.to(device)
-        seg_output, th_output = net_one(img)
-        seg_output_p = torch.softmax(seg_output, dim=1)[:, 1]
-        loss_seg = Loss(seg_output, lab)
-        loss_th, cl = thloss(th_output,
-                             seg_output_p.detach().unsqueeze(1),
-                             lab.unsqueeze(1))
-        loss = loss_seg + loss_th
-        optm_one.zero_grad()
-        loss.backward()
-        optm_one.step()
+                    seg_output, th_output = net_one(img)
+                    seg_output_p = torch.softmax(seg_output, dim=1)[:, 1]
+                    seg_pred = seg_output.max(dim=1)[1]
+                    th_pred = torch.zeros_like(seg_pred).squeeze()
+                    th_pred[seg_output_p > th_output.squeeze()] = 1
 
-        l_seg.add(loss_seg.item())
-        l_th.add(loss_th.item())
-        l_all.add(loss.item())
+                    test_acc_i, _, test_mean_iu_i, _ = label_accuracy_score(
+                        lab.data.cpu().numpy(),
+                        seg_pred.data.cpu().numpy(), NUM_CLASSES)
+                    test_acc_i_e, _, test_mean_iu_i_e, _ = label_accuracy_score(
+                        lab.data.cpu().numpy(),
+                        th_pred.data.cpu().numpy(), NUM_CLASSES)
 
-        seg_pred = seg_output.max(dim=1)[1]
-        th_pred = torch.zeros_like(seg_pred).squeeze()
-        th_pred[seg_output_p > th_output.squeeze()] = 1
+                    test_acc.add(test_acc_i)
+                    test_mean_iu.add(test_mean_iu_i)
+                    test_acc_e.add(test_acc_i_e)
+                    test_mean_iu_e.add(test_mean_iu_i_e)
 
-        _, _, train_mean_iu_i, _ = label_accuracy_score(
-            lab.data.cpu().numpy(),
-            seg_pred.data.cpu().numpy(), NUM_CLASSES)
-        _, _, train_mean_iu_i_2, _ = label_accuracy_score(
-            lab.data.cpu().numpy(),
-            th_pred.data.cpu().numpy(), NUM_CLASSES)
+        #画图
+        writer.add_scalars(
+            "TrainLoss",
+            {
+                "loss_seg": l_seg.value()[0],
+                "loss_th": l_th.value()[0],
+                "loss_all": l_all.value()[0],
+            },
+            ep,
+        )
+        writer.add_scalars(
+            "miou",
+            {
+                "train_miou_seg": train_miou_seg.value()[0],
+                "train_miou_th": train_miou_th.value()[0],
+                "test_miou": test_mean_iu.value()[0],
+                "test_miou2": test_mean_iu_e.value()[0],
+                "best_mIU": best_mIU,
+                "best_mIU2": best_mIU_2,
+            },
+            ep,
+        )
+        image_batch = torch.zeros((3, 1, input_size[0], input_size[0])).float()
+        image_batch[0, 0] = seg_pred[0].float()
+        image_batch[1, 0] = th_pred[0].float()
+        image_batch[2, 0] = lab[0].float()
+        writer.add_images("test_img",
+                          image_batch,
+                          global_step=ep,
+                          dataformats="NCHW")
 
-        train_miou_seg.add(train_mean_iu_i)
-        train_miou_th.add(train_mean_iu_i_2)
-
-    scheduler_lr_one.step()  # 动态学习率
-
-    with torch.no_grad():
-        test_acc.reset()
-        test_mean_iu.reset()
-        test_acc_e.reset()
-        test_mean_iu_e.reset()
-        net_one.eval()
-        for _ in tqdm(range(1), ):
-            for i, data in tqdm(enumerate(test_dataloader),
-                                total=test_dataloader.__len__(),
-                                leave=False):
-                if i > 5:
-                    break
-                img, lab = data
-                img, lab = img.to(device), lab.to(device)
-
-                seg_output, th_output = net_one(img)
-                seg_output_p = torch.softmax(seg_output, dim=1)[:, 1]
-                seg_pred = seg_output.max(dim=1)[1]
-                th_pred = torch.zeros_like(seg_pred).squeeze()
-                th_pred[seg_output_p > th_output.squeeze()] = 1
-
-                test_acc_i, _, test_mean_iu_i, _ = label_accuracy_score(
-                    lab.data.cpu().numpy(),
-                    seg_pred.data.cpu().numpy(), NUM_CLASSES)
-                test_acc_i_e, _, test_mean_iu_i_e, _ = label_accuracy_score(
-                    lab.data.cpu().numpy(),
-                    th_pred.data.cpu().numpy(), NUM_CLASSES)
-
-                test_acc.add(test_acc_i)
-                test_mean_iu.add(test_mean_iu_i)
-                test_acc_e.add(test_acc_i_e)
-                test_mean_iu_e.add(test_mean_iu_i_e)
-
-    #画图
-    writer.add_scalars(
-        "TrainLoss",
-        {
-            "loss_seg": l_seg.value()[0],
-            "loss_th": l_th.value()[0],
-            "loss_all": l_all.value()[0],
-        },
-        ep,
-    )
-    writer.add_scalars(
-        "miou",
-        {
-            "train_miou_seg": train_miou_seg.value()[0],
-            "train_miou_th": train_miou_th.value()[0],
-            "test_miou": test_mean_iu.value()[0],
-            "test_miou2": test_mean_iu_e.value()[0],
-            "best_mIU": best_mIU,
-            "best_mIU2": best_mIU_2,
-        },
-        ep,
-    )
-    image_batch = torch.zeros((3, 1, input_size[0], input_size[0])).float()
-    image_batch[0, 0] = seg_pred[0].float()
-    image_batch[1, 0] = th_pred[0].float()
-    image_batch[2, 0] = lab[0].float()
-    writer.add_images("test_img",
-                      image_batch,
-                      global_step=ep,
-                      dataformats="NCHW")
-
-    if test_mean_iu_e.value()[0] >= best_mIU_2:
-        best_mIU = train_miou_seg.value()[0]
-        best_mIU_2 = test_mean_iu_e.value()[0]
-        state = {
-            'state_one': net_one.state_dict(),
-            'EPOCH_start': ep,
-            'mIU': best_mIU_2
-        }
-        torch.save(state, save_path)
+        if test_mean_iu_e.value()[0] >= best_mIU_2:
+            best_mIU = train_miou_seg.value()[0]
+            best_mIU_2 = test_mean_iu_e.value()[0]
+            state = {
+                'state_one': net_one.state_dict(),
+                'EPOCH_start': ep,
+                'mIU': best_mIU_2
+            }
+            torch.save(state, save_path)
